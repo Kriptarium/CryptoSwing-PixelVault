@@ -1,13 +1,10 @@
-# CryptoSwing-PixelVault (R/G/B renkli histogram + NPCR/UACI)
+# CryptoSwing-PixelVault (Correlation-enabled)
 
-Ham RGB piksel verisi üzerinde AEAD (ChaCha20-Poly1305 / AES-GCM) ile şifreleme yapar; **şifreli görüntüyü görsel olarak gösterir** ve **R/G/B renkli histogramlar** ile **NPCR/UACI** metriklerini raporlar.
-
-## Özellikler
-- 🔐 AEAD: ChaCha20-Poly1305 veya AES-GCM
-- 🧩 HKDF(SHA-256) ile anahtar türetimi
-- 🖼️ Ham RGB şifreleme → şifreli görüntü önizleme
-- 🎨 Histogramlar: R (kırmızı), G (yeşil), B (mavi)
-- 📊 Metrikler: **NPCR** (Number of Pixels Change Rate) ve **UACI** (Unified Average Changing Intensity)
+Bu sürüm, AEAD (ChaCha20-Poly1305 / AES-GCM) ile ham RGB şifreleme yapar ve:
+- R/G/B **renkli histogramlar**
+- **Adjacent-pixel correlation** (yatay ve dikey) — sayısal ve örnek scatter
+- **NPCR/UACI** metrikleri
+hesaplar.
 
 ## Çalıştırma
 ```bash

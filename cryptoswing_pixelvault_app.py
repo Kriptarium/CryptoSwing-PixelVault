@@ -69,7 +69,7 @@ def img_to_rgb_bytes(img: Image.Image) -> bytes:
 def rgb_bytes_to_img(b: bytes, w: int, h: int) -> Image.Image:
     arr = np.frombuffer(b, dtype=np.uint8)
     if arr.size != w*h*3:
-        raise ValueError("Boyut uyuşmazlığı: ciphertext uzunluğu beklenen piksel sayısıyla eşleşmiyor.")
+        raise ValueError("Boyut uyuşmazlığı: uzunluk H*W*3 değil.")
     arr = arr.reshape((h, w, 3))
     return Image.fromarray(arr, mode="RGB")
 
@@ -81,8 +81,7 @@ def compute_histograms(img: Image.Image):
     r_hist = np.bincount(r, minlength=256)
     g_hist = np.bincount(g, minlength=256)
     b_hist = np.bincount(b, minlength=256)
-    all_hist = np.bincount(arr.reshape(-1), minlength=256)
-    return r_hist, g_hist, b_hist, all_hist
+    return r_hist, g_hist, b_hist
 
 def plot_hist_colored(r_hist, g_hist, b_hist, title):
     fig, ax = plt.subplots()
@@ -96,18 +95,49 @@ def plot_hist_colored(r_hist, g_hist, b_hist, title):
     fig.tight_layout()
     return fig
 
-def plot_single_hist(hist, title, color=None):
+# ---- Correlation utilities ----
+def _horizontal_pairs(channel: np.ndarray):
+    X = channel[:, :-1].reshape(-1)
+    Y = channel[:, 1: ].reshape(-1)
+    return X, Y
+
+def _vertical_pairs(channel: np.ndarray):
+    X = channel[:-1, :].reshape(-1)
+    Y = channel[ 1:, :].reshape(-1)
+    return X, Y
+
+def _pearson_corr(x: np.ndarray, y: np.ndarray):
+    if x.size == 0 or y.size == 0:
+        return float('nan')
+    return np.corrcoef(x, y)[0, 1]
+
+def channel_correlations(img: Image.Image):
+    A = np.array(img.convert("RGB"), dtype=np.uint8)
+    R, G, B = A[:,:,0], A[:,:,1], A[:,:,2]
+    res = {}
+    for name, ch in [("R", R), ("G", G), ("B", B)]:
+        xh, yh = _horizontal_pairs(ch)
+        xv, yv = _vertical_pairs(ch)
+        res[f"{name}_h"] = float(_pearson_corr(xh, yh))
+        res[f"{name}_v"] = float(_pearson_corr(xv, yv))
+    return res
+
+def scatter_pairs_fig(channel: np.ndarray, title: str, max_pts=6000):
+    x, y = _horizontal_pairs(channel)
+    n = x.size
+    if n > max_pts:
+        idx = np.random.choice(n, size=max_pts, replace=False)
+        x = x[idx]; y = y[idx]
     fig, ax = plt.subplots()
-    ax.plot(range(256), hist, color=color)
+    ax.scatter(x, y, s=2)  # default color
     ax.set_title(title)
-    ax.set_xlabel("Intensity (0–255)")
-    ax.set_ylabel("Count")
+    ax.set_xlabel("Pixel i")
+    ax.set_ylabel("Adjacent pixel")
     fig.tight_layout()
     return fig
 
+# ---- Encryption over raw RGB ----
 def encrypt_pixels(img: Image.Image, key_bytes: bytes, algorithm: str):
-    """Encrypt raw RGB pixel bytes with AEAD so we can visualize the encrypted image.
-       We still provide the secure package (nonce|aad|ciphertext||tag)."""
     img = img.convert("RGB")
     w, h = img.size
     mode = img.mode
@@ -123,7 +153,7 @@ def encrypt_pixels(img: Image.Image, key_bytes: bytes, algorithm: str):
     nonce = os.urandom(12)
 
     ct_plus_tag = aead.encrypt(nonce, rgb_plain, aad)  # len = len(plain)+16
-    ct = ct_plus_tag[:-16]  # strip tag for visualization length match
+    ct = ct_plus_tag[:-16]
     enc_img = rgb_bytes_to_img(ct, w, h)
 
     pkg = package_ciphertext(alg_name, nonce, aad, ct_plus_tag)
@@ -146,41 +176,9 @@ def decrypt_pixels(pkg_bytes: bytes, key_bytes: bytes):
     img = rgb_bytes_to_img(plain, w, h)
     return img, alg_name
 
-def compute_npcr_uaci(img_a: Image.Image, img_b: Image.Image):
-    """Compute NPCR and UACI between two RGB images of same size."""
-    A = np.array(img_a.convert("RGB"), dtype=np.uint8)
-    B = np.array(img_b.convert("RGB"), dtype=np.uint8)
-    if A.shape != B.shape:
-        raise ValueError("NPCR/UACI için görüntü boyutları eşleşmiyor.")
-    H, W, C = A.shape
-    total_pixels = H * W
-
-    # Per-pixel change (any channel difference)
-    changed = np.any(A != B, axis=2)
-    npcr_overall = changed.sum() / total_pixels * 100.0
-
-    # UACI overall across all channels
-    diff = np.abs(A.astype(np.int16) - B.astype(np.int16))
-    uaci_overall = diff.mean() / 255.0 * 100.0
-
-    # Per-channel NPCR & UACI
-    npcr_r = (A[:,:,0] != B[:,:,0]).sum() / total_pixels * 100.0
-    npcr_g = (A[:,:,1] != B[:,:,1]).sum() / total_pixels * 100.0
-    npcr_b = (A[:,:,2] != B[:,:,2]).sum() / total_pixels * 100.0
-    uaci_r = (np.abs(A[:,:,0].astype(np.int16) - B[:,:,0].astype(np.int16)).mean() / 255.0) * 100.0
-    uaci_g = (np.abs(A[:,:,1].astype(np.int16) - B[:,:,1].astype(np.int16)).mean() / 255.0) * 100.0
-    uaci_b = (np.abs(A[:,:,2].astype(np.int16) - B[:,:,2].astype(np.int16)).mean() / 255.0) * 100.0
-
-    return {
-        "NPCR_overall_%": npcr_overall,
-        "UACI_overall_%": uaci_overall,
-        "NPCR_R_%": npcr_r, "NPCR_G_%": npcr_g, "NPCR_B_%": npcr_b,
-        "UACI_R_%": uaci_r, "UACI_G_%": uaci_g, "UACI_B_%": uaci_b,
-    }
-
 # ---- UI ----
 st.title("🧿 CryptoSwing-PixelVault")
-st.caption("AEAD Görsel Şifreleme • ChaCha20-Poly1305 / AES-GCM • HKDF-SHA256 • R/G/B Renkli Histogram + NPCR/UACI")
+st.caption("AEAD Görsel Şifreleme • ChaCha20-Poly1305 / AES-GCM • HKDF-SHA256 • R/G/B Histogram + Korelasyon + NPCR/UACI")
 
 tab_enc, tab_dec = st.tabs(["🧪 Şifrele", "🔓 Çöz"])
 
@@ -193,7 +191,7 @@ with tab_enc:
         alg = st.selectbox("Algoritma", ["ChaCha20-Poly1305", "AES-GCM"])
         run = st.button("Şifrele ve Analiz Et")
     with col_right:
-        st.info("Not: Şifreleme ham piksel verisi üzerinde yapılır; böylece şifreli görüntü görsel olarak da gösterilebilir. Güvenli paket (.bin) ayrıca üretilir.")
+        st.info("Şifreleme ham piksel verisi üzerinde yapılır; böylece şifreli görüntü görsel olarak da gösterilebilir. Güvenli paket (.bin) ayrıca üretilir.")
 
     if run:
         if not img_file or not key_file:
@@ -206,30 +204,71 @@ with tab_enc:
 
                 c1, c2 = st.columns([1,1])
                 with c1:
-                    st.subheader("Original Image")
+                    st.subheader("Orijinal")
                     st.image(orig_img, use_column_width=True)
                 with c2:
-                    st.subheader("Ciphered Image")
+                    st.subheader("Şifreli Görüntü")
                     st.image(enc_img, use_column_width=True)
 
-                # Histograms (colored)
-                st.markdown("### Histogram Analizi (0–255)")
-                (r_o, g_o, b_o, all_o) = compute_histograms(orig_img)
-                (r_e, g_e, b_e, all_e) = compute_histograms(enc_img)
+                # Histograms
+                st.markdown("### Histogramlar — R/G/B")
+                (r_o, g_o, b_o) = compute_histograms(orig_img)
+                (r_e, g_e, b_e) = compute_histograms(enc_img)
 
                 hc1, hc2 = st.columns([1,1])
                 with hc1:
-                    st.pyplot(plot_hist_colored(r_o, g_o, b_o, "Original Image — R/G/B"))
+                    st.pyplot(plot_hist_colored(r_o, g_o, b_o, "Orijinal — R/G/B"))
                 with hc2:
-                    st.pyplot(plot_hist_colored(r_e, g_e, b_e, "Ciphered Image — R/G/B"))
+                    st.pyplot(plot_hist_colored(r_e, g_e, b_e, "Şifreli — R/G/B"))
+
+                # Correlation numbers
+                st.markdown("### Adjacent-Pixel Correlation (Pearson r) — yatay (h) / dikey (v)")
+                corr_o = channel_correlations(orig_img)
+                corr_e = channel_correlations(enc_img)
+                colA, colB = st.columns([1,1])
+                with colA:
+                    st.write("**Orijinal**:")
+                    st.json({k: round(v, 6) for k, v in corr_o.items()})
+                with colB:
+                    st.write("**Şifreli**:")
+                    st.json({k: round(v, 6) for k, v in corr_e.items()})
+
+                # Optional scatter plots: R channel samples
+                st.markdown("#### Örnek saçılım grafiği (R kanalı, yatay komşular)")
+                A = np.array(orig_img, dtype=np.uint8)[:,:,0]
+                fig_o = scatter_pairs_fig(A, "Orijinal — R (komşu pikseller)")
+                st.pyplot(fig_o)
+                B = np.array(enc_img, dtype=np.uint8)[:,:,0]
+                fig_e = scatter_pairs_fig(B, "Şifreli — R (komşu pikseller)")
+                st.pyplot(fig_e)
 
                 # NPCR & UACI
-                metrics = compute_npcr_uaci(orig_img, enc_img)
                 st.markdown("### NPCR & UACI (Orijinal ↔ Şifreli)")
-                st.json({k: round(v, 4) for k, v in metrics.items()})
+                def compute_npcr_uaci(img_a: Image.Image, img_b: Image.Image):
+                    A = np.array(img_a.convert("RGB"), dtype=np.uint8)
+                    B = np.array(img_b.convert("RGB"), dtype=np.uint8)
+                    if A.shape != B.shape: raise ValueError("Boyutlar eşleşmiyor.")
+                    H, W, C = A.shape
+                    total = H*W
+                    changed = np.any(A != B, axis=2)
+                    npcr_over = changed.sum() / total * 100.0
+                    diff = np.abs(A.astype(np.int16) - B.astype(np.int16))
+                    uaci_over = diff.mean() / 255.0 * 100.0
+                    npcr_r = (A[:,:,0] != B[:,:,0]).sum() / total * 100.0
+                    npcr_g = (A[:,:,1] != B[:,:,1]).sum() / total * 100.0
+                    npcr_b = (A[:,:,2] != B[:,:,2]).sum() / total * 100.0
+                    uaci_r = (np.abs(A[:,:,0].astype(np.int16) - B[:,:,0].astype(np.int16)).mean()/255.0)*100.0
+                    uaci_g = (np.abs(A[:,:,1].astype(np.int16) - B[:,:,1].astype(np.int16)).mean()/255.0)*100.0
+                    uaci_b = (np.abs(A[:,:,2].astype(np.int16) - B[:,:,2].astype(np.int16)).mean()/255.0)*100.0
+                    return {
+                        "NPCR_overall_%": npcr_over, "UACI_overall_%": uaci_over,
+                        "NPCR_R_%": npcr_r, "NPCR_G_%": npcr_g, "NPCR_B_%": npcr_b,
+                        "UACI_R_%": uaci_r, "UACI_G_%": uaci_g, "UACI_B_%": uaci_b,
+                    }
+                metrics = compute_npcr_uaci(orig_img, enc_img)
+                st.json({k: (round(v, 6) if isinstance(v, float) else v) for k,v in metrics.items()})
 
                 st.download_button("⬇️ Şifreli Paketi İndir (.bin)", data=pkg, file_name="pixelvault_encrypted.bin")
-                st.caption(f"Paket boyutu: {len(pkg):,} bayt")
 
             except Exception as e:
                 st.exception(e)
@@ -250,13 +289,14 @@ with tab_dec:
 
                 st.image(dec_img, caption="Çözülen Görüntü", use_column_width=True)
 
-                # Histogram for decrypted (should be similar to original used during encrypt)
-                (r_d, g_d, b_d, all_d) = compute_histograms(dec_img)
-                st.markdown("### Histogram (Çözülen Görüntü) — R/G/B")
-                st.pyplot(plot_hist_colored(r_d, g_d, b_d, "Decrypted — R/G/B"))
+                # Correlations for decrypted
+                corr_d = channel_correlations(dec_img)
+                st.markdown("### Korelasyon (Çözülen) — yatay/dikey")
+                st.json({k: round(v, 6) for k, v in corr_d.items()})
 
-                st.markdown("### Not")
-                st.write("Bu sekmede NPCR/UACI hesaplaması için orijinal görüntü gerekirdi. İstersen şifreleme sekmesinde orijinal↔şifreli karşılaştırmasını kullandığımız gibi, burada da 'orijinal' dosyayı ek bir yükleyiciyle alıp karşılaştıracak şekilde genişletebilirim.")
+                # Histograms for decrypted
+                r_d, g_d, b_d = compute_histograms(dec_img)
+                st.pyplot(plot_hist_colored(r_d, g_d, b_d, "Decrypted — R/G/B"))
 
                 buf = io.BytesIO()
                 dec_img.save(buf, format="PNG")
