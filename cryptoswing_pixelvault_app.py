@@ -3,6 +3,7 @@ import streamlit as st
 import io, os, struct
 from PIL import Image
 import numpy as np
+import matplotlib.pyplot as plt
 
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -11,11 +12,10 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
 APP_NAME = "CryptoSwing-PixelVault"
 MAGIC = b"CHAEADv1"
 
-st.set_page_config(page_title=APP_NAME, page_icon="🧿", layout="centered")
+st.set_page_config(page_title=APP_NAME, page_icon="🧿", layout="wide")
 
-# --- Helpers ---
+# ---- Helpers ----
 def read_key_bytes(file_bytes: bytes) -> bytes:
-    # If the key file looks like only '0'/'1', parse bits. Otherwise, use raw bytes.
     try:
         txt = file_bytes.decode('utf-8', errors='ignore').strip()
     except:
@@ -34,7 +34,7 @@ def hkdf_sha256(ikm: bytes, info: bytes, length: int, salt: bytes=b"ChaosImgSalt
     hkdf = HKDF(algorithm=hashes.SHA256(), length=length, salt=salt, info=info)
     return hkdf.derive(ikm)
 
-def package_ciphertext(alg_name: str, nonce: bytes, aad: bytes, ciphertext: bytes) -> bytes:
+def package_ciphertext(alg_name: str, nonce: bytes, aad: bytes, ciphertext_plus_tag: bytes) -> bytes:
     pkg = bytearray()
     pkg += MAGIC
     pkg += bytes([len(alg_name)])
@@ -43,8 +43,8 @@ def package_ciphertext(alg_name: str, nonce: bytes, aad: bytes, ciphertext: byte
     pkg += nonce
     pkg += struct.pack(">I", len(aad))
     pkg += aad
-    pkg += struct.pack(">Q", len(ciphertext))
-    pkg += ciphertext
+    pkg += struct.pack(">Q", len(ciphertext_plus_tag))
+    pkg += ciphertext_plus_tag
     return bytes(pkg)
 
 def parse_package(data: bytes):
@@ -62,34 +62,63 @@ def parse_package(data: bytes):
     ct = data[off:off+ct_len]; off += ct_len
     return alg_name, nonce, aad, ct
 
-def encrypt_image(img_bytes: bytes, key_bytes: bytes, algorithm: str):
-    # Load and re-encode as PNG for deterministic bytes
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+def img_to_rgb_bytes(img: Image.Image) -> bytes:
+    arr = np.array(img.convert("RGB"), dtype=np.uint8)
+    return arr.tobytes(order="C")
+
+def rgb_bytes_to_img(b: bytes, w: int, h: int) -> Image.Image:
+    arr = np.frombuffer(b, dtype=np.uint8)
+    if arr.size != w*h*3:
+        raise ValueError("Boyut uyuşmazlığı: ciphertext uzunluğu beklenen piksel sayısıyla eşleşmiyor.")
+    arr = arr.reshape((h, w, 3))
+    return Image.fromarray(arr, mode="RGB")
+
+def compute_histograms(img: Image.Image):
+    arr = np.array(img.convert("RGB"), dtype=np.uint8)
+    r = arr[:,:,0].reshape(-1)
+    g = arr[:,:,1].reshape(-1)
+    b = arr[:,:,2].reshape(-1)
+    r_hist = np.bincount(r, minlength=256)
+    g_hist = np.bincount(g, minlength=256)
+    b_hist = np.bincount(b, minlength=256)
+    all_hist = np.bincount(arr.reshape(-1), minlength=256)
+    return r_hist, g_hist, b_hist, all_hist
+
+def plot_hist(hist, title):
+    fig, ax = plt.subplots()
+    ax.plot(range(256), hist)
+    ax.set_title(title)
+    ax.set_xlabel("Intensity (0–255)")
+    ax.set_ylabel("Count")
+    fig.tight_layout()
+    return fig
+
+def encrypt_pixels(img: Image.Image, key_bytes: bytes, algorithm: str):
+    """Encrypt raw RGB pixel bytes with AEAD so we can visualize the encrypted image.
+       We still provide the secure package (nonce|aad|ciphertext||tag)."""
+    img = img.convert("RGB")
     w, h = img.size
     mode = img.mode
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    plaintext = buf.getvalue()
+    rgb_plain = img_to_rgb_bytes(img)
 
     aead_key = hkdf_sha256(key_bytes, info=b"AEAD-KEY-Chaos", length=32)
+    aad = b"CHAOSIMG" + h.to_bytes(4,'big') + w.to_bytes(4,'big') + mode.encode('ascii')
 
     if algorithm == "ChaCha20-Poly1305":
-        aead = ChaCha20Poly1305(aead_key)
-        nonce = os.urandom(12)
-        alg_name = "CHACHA20-POLY1305"
+        aead = ChaCha20Poly1305(aead_key); alg_name = "CHACHA20-POLY1305"
     else:
-        aead = AESGCM(aead_key)
-        nonce = os.urandom(12)
-        alg_name = "AES-GCM"
+        aead = AESGCM(aead_key); alg_name = "AES-GCM"
+    nonce = os.urandom(12)
 
-    aad = b"CHAOSIMG" + h.to_bytes(4,'big') + w.to_bytes(4,'big') + mode.encode('ascii')
-    ciphertext = aead.encrypt(nonce, plaintext, aad)
+    ct_plus_tag = aead.encrypt(nonce, rgb_plain, aad)  # len = len(plain)+16
+    ct = ct_plus_tag[:-16]  # strip tag for visualization length match
+    enc_img = rgb_bytes_to_img(ct, w, h)
 
-    pkg = package_ciphertext(alg_name, nonce, aad, ciphertext)
-    return pkg, img  # return original PIL for preview
+    pkg = package_ciphertext(alg_name, nonce, aad, ct_plus_tag)
+    return enc_img, pkg
 
-def decrypt_package(pkg_bytes: bytes, key_bytes: bytes):
-    alg_name, nonce, aad, ct = parse_package(pkg_bytes)
+def decrypt_pixels(pkg_bytes: bytes, key_bytes: bytes):
+    alg_name, nonce, aad, ct_plus_tag = parse_package(pkg_bytes)
     aead_key = hkdf_sha256(key_bytes, info=b"AEAD-KEY-Chaos", length=32)
     if alg_name == "CHACHA20-POLY1305":
         aead = ChaCha20Poly1305(aead_key)
@@ -97,65 +126,101 @@ def decrypt_package(pkg_bytes: bytes, key_bytes: bytes):
         aead = AESGCM(aead_key)
     else:
         raise ValueError(f"Desteklenmeyen algoritma: {alg_name}")
-    plaintext = aead.decrypt(nonce, ct, aad)
-    img = Image.open(io.BytesIO(plaintext)).convert("RGB")
-    return img, alg_name, aad
+    plain = aead.decrypt(nonce, ct_plus_tag, aad)  # raw RGB
+    if not aad.startswith(b"CHAOSIMG"):
+        raise ValueError("AAD beklenen formatta değil.")
+    h = int.from_bytes(aad[8:12],"big")
+    w = int.from_bytes(aad[12:16],"big")
+    img = rgb_bytes_to_img(plain, w, h)
+    return img, alg_name
 
-# --- UI ---
+# ---- UI ----
 st.title("🧿 CryptoSwing-PixelVault")
-st.caption("AEAD ile Görsel Şifreleme • ChaCha20-Poly1305 / AES-GCM • HKDF-SHA256 anahtar türetimi")
-
-with st.sidebar:
-    st.header("Hakkında")
-    st.markdown("""
-**CryptoSwing-PixelVault**, görselleri AEAD (kimlik doğrulamalı şifreleme) ile güvenle paketler:
-- Algoritmalar: **ChaCha20-Poly1305** veya **AES-GCM**
-- Anahtar: Yüklediğiniz dosyadan **HKDF(SHA-256)** ile türetilir
-- Paket: `magic | alg | nonce | aad | ciphertext+tag` (ikili .bin)
- """)
-    st.markdown("---")
-    st.write("⚠️ Bu uygulama örnek/demo amaçlıdır. Üretim ortamında anahtar yönetimi ve nonce politikaları dikkatle tasarlanmalıdır.")
+st.caption("AEAD Görsel Şifreleme • ChaCha20-Poly1305 / AES-GCM • HKDF-SHA256 • Histogram Analizi")
 
 tab_enc, tab_dec = st.tabs(["🧪 Şifrele", "🔓 Çöz"])
 
 with tab_enc:
-    st.subheader("Görüntü Şifrele")
-    img_file = st.file_uploader("Görüntü (PNG/JPG)", type=["png","jpg","jpeg","bmp","webp"], key="enc_img")
-    key_file = st.file_uploader("Anahtar dosyası (örn. bit dizisi içeren .txt)", type=None, key="enc_key")
-    alg = st.selectbox("Algoritma", ["ChaCha20-Poly1305", "AES-GCM"])
-    if st.button("Şifrele"):
+    col_left, col_right = st.columns([1,1])
+    with col_left:
+        st.subheader("Görüntü ve Anahtar")
+        img_file = st.file_uploader("Görüntü (PNG/JPG)", type=["png","jpg","jpeg","bmp","webp"], key="enc_img")
+        key_file = st.file_uploader("Anahtar dosyası (örn. bit dizisi .txt)", type=None, key="enc_key")
+        alg = st.selectbox("Algoritma", ["ChaCha20-Poly1305", "AES-GCM"])
+        run = st.button("Şifrele ve Analiz Et")
+    with col_right:
+        st.info("Not: Şifreleme ham piksel verisi üzerinde yapılır; böylece şifreli görüntü görsel olarak da gösterilebilir. Güvenli paket (.bin) ayrıca üretilir.")
+
+    if run:
         if not img_file or not key_file:
             st.error("Lütfen hem görüntü hem anahtar dosyasını yükleyin.")
         else:
             try:
                 key_bytes = read_key_bytes(key_file.read())
-                pkg, preview_img = encrypt_image(img_file.read(), key_bytes, algorithm=alg)
-                st.success("Şifreleme başarılı!")
-                st.image(preview_img, caption="Önizleme (PNG tabanı)", use_column_width=True)
+                orig_img = Image.open(io.BytesIO(img_file.read())).convert("RGB")
+                enc_img, pkg = encrypt_pixels(orig_img, key_bytes, algorithm=alg)
+
+                c1, c2 = st.columns([1,1])
+                with c1:
+                    st.subheader("Orijinal")
+                    st.image(orig_img, use_column_width=True)
+                with c2:
+                    st.subheader("Şifreli Görüntü")
+                    st.image(enc_img, use_column_width=True)
+
+                # Histograms
+                st.markdown("### Histogram Analizi (0–255)")
+                (r_o, g_o, b_o, all_o) = compute_histograms(orig_img)
+                (r_e, g_e, b_e, all_e) = compute_histograms(enc_img)
+
+                hc1, hc2 = st.columns([1,1])
+                with hc1:
+                    st.pyplot(plot_hist(all_o, "Orijinal (Tüm Kanallar)"))
+                    st.pyplot(plot_hist(r_o, "Orijinal R"))
+                    st.pyplot(plot_hist(g_o, "Orijinal G"))
+                    st.pyplot(plot_hist(b_o, "Orijinal B"))
+                with hc2:
+                    st.pyplot(plot_hist(all_e, "Şifreli (Tüm Kanallar)"))
+                    st.pyplot(plot_hist(r_e, "Şifreli R"))
+                    st.pyplot(plot_hist(g_e, "Şifreli G"))
+                    st.pyplot(plot_hist(b_e, "Şifreli B"))
+
                 st.download_button("⬇️ Şifreli Paketi İndir (.bin)", data=pkg, file_name="pixelvault_encrypted.bin")
-                st.info(f"Paket boyutu: {len(pkg):,} bayt")
+                st.caption(f"Paket boyutu: {len(pkg):,} bayt")
+
             except Exception as e:
                 st.exception(e)
 
 with tab_dec:
-    st.subheader("Şifreli Paketi Çöz")
+    st.subheader("Şifreli Paketi Çöz ve Analiz Et")
     pkg_file = st.file_uploader("Şifreli paket (.bin)", type=["bin"], key="dec_pkg")
     key_file2 = st.file_uploader("Anahtar dosyası (aynısı)", type=None, key="dec_key")
-    if st.button("Çöz"):
+    if st.button("Çöz ve Analiz Et"):
         if not pkg_file or not key_file2:
             st.error("Lütfen hem şifreli paket hem anahtar dosyasını yükleyin.")
         else:
             try:
                 pkg_bytes = pkg_file.read()
                 key_bytes2 = read_key_bytes(key_file2.read())
-                img, alg_name, aad = decrypt_package(pkg_bytes, key_bytes2)
+                dec_img, alg_name = decrypt_pixels(pkg_bytes, key_bytes2)
                 st.success(f"Doğrulama OK • Algoritma: {alg_name}")
-                st.image(img, caption="Çözülen Görüntü", use_column_width=True)
+
+                st.image(dec_img, caption="Çözülen Görüntü", use_column_width=True)
+
+                # Histogram for decrypted (should match original)
+                (r_d, g_d, b_d, all_d) = compute_histograms(dec_img)
+                st.markdown("### Histogram Analizi (Çözülen Görüntü)")
+                dd1, dd2 = st.columns([1,1])
+                with dd1:
+                    st.pyplot(plot_hist(all_d, "Decrypted (Tüm Kanallar)"))
+                    st.pyplot(plot_hist(r_d, "Decrypted R"))
+                with dd2:
+                    st.pyplot(plot_hist(g_d, "Decrypted G"))
+                    st.pyplot(plot_hist(b_d, "Decrypted B"))
 
                 buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-                st.download_button("⬇️ PNG Olarak İndir", data=png_bytes, file_name="pixelvault_decrypted.png")
-                st.caption(f"PNG boyutu: {len(png_bytes):,} bayt")
+                dec_img.save(buf, format="PNG")
+                st.download_button("⬇️ PNG Olarak İndir", data=buf.getvalue(), file_name="pixelvault_decrypted.png")
+
             except Exception as e:
                 st.exception(e)
