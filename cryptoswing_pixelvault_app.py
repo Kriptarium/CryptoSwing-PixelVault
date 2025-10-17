@@ -112,13 +112,7 @@ with st.sidebar:
 - Algoritmalar: **ChaCha20-Poly1305** veya **AES-GCM**
 - Anahtar: Yüklediğiniz dosyadan **HKDF(SHA-256)** ile türetilir
 - Paket: `magic | alg | nonce | aad | ciphertext+tag` (ikili .bin)
-""")
-
-**CryptoSwing-PixelVault**, görselleri AEAD (kimlik doğrulamalı şifreleme) ile güvenle paketler:
-- Algoritmalar: **ChaCha20-Poly1305** veya **AES-GCM**
-- Anahtar: Yüklediğiniz dosyadan **HKDF(SHA-256)** ile türetilir
-- Paket: `magic | alg | nonce | aad | ciphertext+tag` (ikili .bin)
-    \"\"\")
+ """)
     st.markdown("---")
     st.write("⚠️ Bu uygulama örnek/demo amaçlıdır. Üretim ortamında anahtar yönetimi ve nonce politikaları dikkatle tasarlanmalıdır.")
 
