@@ -107,7 +107,13 @@ st.caption("AEAD ile Görsel Şifreleme • ChaCha20-Poly1305 / AES-GCM • HKDF
 
 with st.sidebar:
     st.header("Hakkında")
-    st.markdown(\"\"\"
+    st.markdown("""
+**CryptoSwing-PixelVault**, görselleri AEAD (kimlik doğrulamalı şifreleme) ile güvenle paketler:
+- Algoritmalar: **ChaCha20-Poly1305** veya **AES-GCM**
+- Anahtar: Yüklediğiniz dosyadan **HKDF(SHA-256)** ile türetilir
+- Paket: `magic | alg | nonce | aad | ciphertext+tag` (ikili .bin)
+""")
+
 **CryptoSwing-PixelVault**, görselleri AEAD (kimlik doğrulamalı şifreleme) ile güvenle paketler:
 - Algoritmalar: **ChaCha20-Poly1305** veya **AES-GCM**
 - Anahtar: Yüklediğiniz dosyadan **HKDF(SHA-256)** ile türetilir
