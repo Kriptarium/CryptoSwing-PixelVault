@@ -206,10 +206,10 @@ with tab_enc:
 
                 c1, c2 = st.columns([1,1])
                 with c1:
-                    st.subheader("Orijinal")
+                    st.subheader("Original Image")
                     st.image(orig_img, use_column_width=True)
                 with c2:
-                    st.subheader("Şifreli Görüntü")
+                    st.subheader("Ciphered Image")
                     st.image(enc_img, use_column_width=True)
 
                 # Histograms (colored)
@@ -219,9 +219,9 @@ with tab_enc:
 
                 hc1, hc2 = st.columns([1,1])
                 with hc1:
-                    st.pyplot(plot_hist_colored(r_o, g_o, b_o, "Orijinal — R/G/B"))
+                    st.pyplot(plot_hist_colored(r_o, g_o, b_o, "Original Image — R/G/B"))
                 with hc2:
-                    st.pyplot(plot_hist_colored(r_e, g_e, b_e, "Şifreli — R/G/B"))
+                    st.pyplot(plot_hist_colored(r_e, g_e, b_e, "Ciphered Image — R/G/B"))
 
                 # NPCR & UACI
                 metrics = compute_npcr_uaci(orig_img, enc_img)
